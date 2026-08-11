@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16
+    container_name: volrv-db
+    environment:
+      POSTGRES_USER: volrv
+      POSTGRES_PASSWORD: volrv
+      POSTGRES_DB: volrv
+    ports:
+      - "5433:5432"
+    volumes:
+      - volrv-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U volrv"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  volrv-pgdata:

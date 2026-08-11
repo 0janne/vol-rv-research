@@ -1,0 +1,43 @@
+[project]
+name = "volrv"
+version = "0.1.0"
+description = "Relative-value volatility research: point-in-time data pipeline, variance risk premium and term-structure signals, walk-forward backtest."
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "sqlalchemy>=2.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.scripts]
+volrv = "volrv.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    # Python 3.12 deprecated sqlite3's implicit date adapters. Postgres is the
+    # intended backend; SQLite is only used for the test suite.
+    "ignore:The default (date|datetime) adapter is deprecated:DeprecationWarning",
+]
