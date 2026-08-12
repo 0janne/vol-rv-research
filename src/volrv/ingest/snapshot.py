@@ -19,8 +19,24 @@ import requests
 from ..db import now, upsert
 
 TIMEOUT = 30
-HEADERS = {"User-Agent": "Mozilla/5.0 (research; volrv/0.1)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 CHAIN_URL = "https://query1.finance.yahoo.com/v7/finance/options/{symbol}"
+CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
+COOKIE_URL = "https://fc.yahoo.com"
+
+
+def _authenticated_session() -> tuple[requests.Session, str]:
+    """Yahoo's v7 options endpoint returns 401 without a session cookie and a
+    matching crumb token. Establish both once and reuse them for the whole
+    chain walk, rather than per-expiry."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    # This request 404s by design; the value is in the Set-Cookie header.
+    session.get(COOKIE_URL, timeout=TIMEOUT)
+    crumb = session.get(CRUMB_URL, timeout=TIMEOUT).text.strip()
+    if not crumb or "<" in crumb:
+        raise RuntimeError("could not obtain a Yahoo crumb token")
+    return session, crumb
 
 
 def _leg(rows: list[dict], cp: str) -> pd.DataFrame:
@@ -44,7 +60,10 @@ def _leg(rows: list[dict], cp: str) -> pd.DataFrame:
 
 def fetch_chain(underlying: str = "SPY") -> pd.DataFrame:
     """Fetch every listed expiry for `underlying` as one tidy frame."""
-    base = requests.get(CHAIN_URL.format(symbol=underlying), headers=HEADERS, timeout=TIMEOUT)
+    session, crumb = _authenticated_session()
+    base = session.get(
+        CHAIN_URL.format(symbol=underlying), params={"crumb": crumb}, timeout=TIMEOUT
+    )
     base.raise_for_status()
     payload = base.json()["optionChain"]["result"][0]
     expiries = payload.get("expirationDates", [])
@@ -52,10 +71,9 @@ def fetch_chain(underlying: str = "SPY") -> pd.DataFrame:
 
     frames = []
     for ts in expiries:
-        r = requests.get(
+        r = session.get(
             CHAIN_URL.format(symbol=underlying),
-            params={"date": ts},
-            headers=HEADERS,
+            params={"date": ts, "crumb": crumb},
             timeout=TIMEOUT,
         )
         if r.status_code != 200:
