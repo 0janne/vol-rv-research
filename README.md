@@ -1,7 +1,7 @@
 # Relative-value volatility research
 
 A point-in-time data pipeline, two volatility signals, and a walk-forward backtest, built to
-answer one question honestly:
+answer one question:
 
 > **Is the equity variance risk premium a strategy, or just a way of getting paid to hold a
 > short tail?**
