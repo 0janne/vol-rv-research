@@ -44,29 +44,24 @@ def init_db(engine=None) -> None:
                 conn.execute(text(stmt))
 
 
-def upsert(df: pd.DataFrame, table: str, pk: list[str], engine=None) -> int:
+def upsert(df: pd.DataFrame, table: str, pk: list[str], engine=None, chunk: int = 500) -> int:
     """Insert-or-replace `df` into `table` keyed on `pk`.
 
     Deliberately not `df.to_sql(if_exists='append')`: re-running a loader must
     not duplicate rows, and must not silently drop corrections either.
+
+    Rows are sent as chunked multi-row VALUES rather than one statement per row.
+    Passing a list of dicts to execute() looks batched but psycopg2 issues one
+    round-trip per row underneath -- fine against a local socket, and about ten
+    minutes for a 10k-row option chain against a hosted database.
     """
     if df.empty:
         return 0
     engine = engine or get_engine()
     df = df.drop_duplicates(subset=pk).copy()
     cols = list(df.columns)
-    backend = engine.url.get_backend_name()
-
-    placeholders = ", ".join(f":{c}" for c in cols)
     collist = ", ".join(cols)
-    if backend == "postgresql":
-        updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c not in pk)
-        stmt = (
-            f"INSERT INTO {table} ({collist}) VALUES ({placeholders}) "
-            f"ON CONFLICT ({', '.join(pk)}) DO UPDATE SET {updates}"
-        )
-    else:
-        stmt = f"INSERT OR REPLACE INTO {table} ({collist}) VALUES ({placeholders})"
+    is_pg = engine.url.get_backend_name() == "postgresql"
 
     records = df.to_dict("records")
     for r in records:
@@ -75,8 +70,25 @@ def upsert(df: pd.DataFrame, table: str, pk: list[str], engine=None) -> int:
                 r[k] = v.to_pydatetime()
             elif pd.isna(v):
                 r[k] = None
+
+    if is_pg:
+        updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c not in pk)
+        head = f"INSERT INTO {table} ({collist}) VALUES "
+        tail = f" ON CONFLICT ({', '.join(pk)}) DO UPDATE SET {updates}"
+    else:
+        head = f"INSERT OR REPLACE INTO {table} ({collist}) VALUES "
+        tail = ""
+
     with engine.begin() as conn:
-        conn.execute(text(stmt), records)
+        for start in range(0, len(records), chunk):
+            batch = records[start : start + chunk]
+            tuples, params = [], {}
+            for i, row in enumerate(batch):
+                keys = [f"{c}_{i}" for c in cols]
+                tuples.append("(" + ", ".join(f":{k}" for k in keys) + ")")
+                for c, k in zip(cols, keys, strict=True):
+                    params[k] = row[c]
+            conn.execute(text(head + ", ".join(tuples) + tail), params)
     return len(records)
 
 
