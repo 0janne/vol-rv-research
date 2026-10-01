@@ -9,14 +9,25 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+from scipy import stats as sps  # noqa: E402
 
 from .backtest import (  # noqa: E402
     backtest_calendar,
+    backtest_spread,
     backtest_variance_carry,
+    block_bootstrap_sharpe_ci,
+    curve_slope,
+    deflated_sharpe,
+    futures_panel,
+    held_contracts,
+    newey_west_t,
+    spread_changes,
     summarise,
     walk_forward,
 )
+from .backtest.futures import COST_PER_LEG  # noqa: E402
 from .config import FIG_DIR, HORIZON_D  # noqa: E402
 from .db import get_engine, now, read, upsert  # noqa: E402
 from .signals import calendar_signal, vrp_ex_post, vrp_proxy, vrp_signal  # noqa: E402
@@ -114,17 +125,77 @@ def run_backtests(engine=None) -> dict:
         results["vrp_walk_forward"]["selections"] = wf.attrs.get("selections", [])[:6]
         _persist("vrp_walk_forward", {"grid_size": len(grid)}, wf, engine)
 
-    # --- 4. Term-structure relative value. ----------------------------------
-    have = wide[["VIX", "VIX3M"]].dropna()
-    cal_pos = calendar_signal(have, entry_z=1.0)
-    cal = backtest_calendar(cal_pos, have)
-    results["calendar_rv"] = summarise(cal["net_pnl"], cal["position"])
-    _persist("calendar_rv", {"entry_z": 1.0, "holding_d": 5}, cal, engine)
+    # --- 4. Term-structure relative value: index (not tradable) vs futures. --
+    # Same signal, same timing, same costs. The only difference is whether the
+    # spread is marked on the VIX indices or on futures that can be traded.
+    series = {"naive": naive, "conditioned": cond, "walk_forward": wf}
+    panel = futures_panel(engine)
+    if not panel.empty:
+        idx = wide[["VIX", "VIX3M"]].dropna()
+        cal_pos = calendar_signal(idx, entry_z=1.0)
+        for offset, tag in ((1, ""), (2, "_m3")):
+            held = held_contracts(panel, back_offset=offset)
+            ch = spread_changes(panel, held)
+            common = ch.index.intersection(idx.index)
+            ch = ch.loc[common]
+            fut = backtest_spread(cal_pos, ch["d_spread"], COST_PER_LEG, ch["rolled"])
+            results[f"calendar_futures{tag}"] = summarise(fut["net_pnl"], fut["position"])
+            _persist(f"calendar_futures{tag}", {"entry_z": 1.0, "back_offset": offset}, fut, engine)
+            series[f"calendar_futures{tag}"] = fut
+            if offset == 1:
+                ix = backtest_calendar(cal_pos.loc[common], idx.loc[common])
+                results["calendar_index"] = summarise(ix["net_pnl"], ix["position"])
+                _persist("calendar_index", {"entry_z": 1.0, "tradable": False}, ix, engine)
+                series["calendar_index"] = ix
+                free = backtest_spread(cal_pos, ch["d_spread"], 0.0, ch["rolled"])
+                results["calendar_futures_nocost"] = summarise(free["net_pnl"], free["position"])
+                series["calendar_futures_nocost"] = free
+                fsig = calendar_signal(curve_slope(panel, held).loc[common], entry_z=1.0)
+                fs = backtest_spread(fsig, ch["d_spread"], COST_PER_LEG, ch["rolled"])
+                results["calendar_futures_curve_signal"] = summarise(
+                    fs["net_pnl"], fs["position"]
+                )
+                series["calendar_futures_curve_signal"] = fs
 
-    results["_series"] = {
-        "naive": naive, "conditioned": cond, "walk_forward": wf, "calendar": cal,
-    }
+    results["_inference"] = inference_table(series, vix, ohlc, grid)
+    results["_series"] = series
     return results
+
+
+def inference_table(series: dict, vix, ohlc, grid) -> pd.DataFrame:
+    """Monthly, non-overlapping inference for every strategy."""
+    rows = []
+    for name, bt in series.items():
+        if bt is None or bt.empty:
+            continue
+        m = bt["net_pnl"].resample("ME").sum()
+        mu, t, p = newey_west_t(m.values)
+        lo, hi = block_bootstrap_sharpe_ci(m.values)
+        rows.append({
+            "strategy": name, "start": m.index[0].strftime("%Y-%m"),
+            "months": len(m), "sharpe": m.mean() / m.std(ddof=1) * np.sqrt(12),
+            "nw_t": t, "p": p, "ci_lo": lo, "ci_hi": hi,
+            "skew": float(sps.skew(m)), "worst_month": float(m.min()),
+        })
+    table = pd.DataFrame(rows).set_index("strategy")
+
+    # Deflated Sharpe for the walk-forward: it selected among len(grid) configs.
+    wf = series.get("walk_forward")
+    if wf is not None and not wf.empty:
+        trial = []
+        for g in grid:
+            m = backtest_variance_carry(vrp_signal(vix, ohlc, **g), vix, ohlc)["net_pnl"]
+            m = m.resample("ME").sum()
+            trial.append(m.mean() / m.std(ddof=1))
+        m = wf["net_pnl"].resample("ME").sum()
+        prob, sr0 = deflated_sharpe(
+            m.mean() / m.std(ddof=1), len(m), float(sps.skew(m)),
+            float(sps.kurtosis(m, fisher=False)), len(grid), float(np.var(trial, ddof=1)),
+        )
+        table.attrs["walk_forward_deflated"] = {
+            "prob": prob, "benchmark_sharpe_ann": sr0 * np.sqrt(12), "n_trials": len(grid),
+        }
+    return table
 
 
 # ---------------------------------------------------------------- figures ---
@@ -192,21 +263,27 @@ def make_figures(results: dict, engine=None) -> list[str]:
     fig.tight_layout()
     paths.append(_save(fig, "02_cumulative_pnl.png"))
 
-    # Fig 3: term structure and the calendar trade.
-    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
-    slope = term_structure_slope(wide).dropna()
-    axes[0].plot(slope.index, slope, lw=0.6, color=PALETTE["line"])
-    axes[0].axhline(0, color=PALETTE["accent"], lw=0.8)
-    _style(
-        axes[0],
-        "Term-structure slope (VIX3M \u2212 VIX) / VIX \u2014 negative = backwardation",
-        "ratio",
-    )
-    cal = s["calendar"]
-    axes[1].plot(cal.index, cal["net_pnl"].cumsum(), lw=1.2, color=PALETTE["line"])
-    _style(axes[1], "Calendar relative-value: cumulative net PnL", "vol points")
-    fig.tight_layout()
-    paths.append(_save(fig, "03_term_structure.png"))
+    # Fig 3: the same calendar signal, marked on the index and on futures.
+    if "calendar_index" in s and "calendar_futures" in s:
+        fig, axes = plt.subplots(
+            2, 1, figsize=(10, 6.2), sharex=True, gridspec_kw={"height_ratios": [1, 1.5]}
+        )
+        slope = term_structure_slope(wide).loc[s["calendar_index"].index[0]:].dropna()
+        axes[0].plot(slope.index, slope, lw=0.6, color=PALETTE["line"])
+        axes[0].axhline(0, color=PALETTE["accent"], lw=0.8)
+        _style(axes[0], "VIX curve slope (VIX3M \u2212 VIX) / VIX \u2014 below 0 = inverted",
+               "ratio")
+        for key, label, color, lw in (
+            ("calendar_index", "Marked on the VIX indices (not tradable)", PALETTE["grey"], 1.2),
+            ("calendar_futures", "Same trades in VIX futures, after costs", PALETTE["accent"], 1.6),
+        ):
+            eq = s[key]["net_pnl"].cumsum()
+            axes[1].plot(eq.index, eq, lw=lw, color=color, label=label)
+        axes[1].axhline(0, color="k", lw=0.6)
+        axes[1].legend(fontsize=8, frameon=False, loc="upper left")
+        _style(axes[1], "Same signal, two instruments: cumulative net PnL", "vol points")
+        fig.tight_layout()
+        paths.append(_save(fig, "03_index_vs_futures.png"))
 
     # Fig 4: the tail. Distribution of daily PnL, naive vs conditioned.
     fig, ax = plt.subplots(figsize=(10, 4))

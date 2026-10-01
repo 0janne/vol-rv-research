@@ -64,38 +64,48 @@ def backtest_variance_carry(
     return out.dropna(subset=["net_pnl"])
 
 
+def backtest_spread(
+    position: pd.Series,
+    d_spread: pd.Series,
+    cost_per_leg: float,
+    rolled: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Daily PnL of a two-leg spread position.
+
+    `position` is the target held over (t, t+1], already lagged by the signal
+    code; `d_spread` on day t is the change in (back - front) from t-1 to t.
+    Costs: each unit of position change trades two legs; a roll closes and
+    reopens the spread, which is four contract-units per unit held.
+    """
+    idx = d_spread.index
+    pos = position.reindex(idx).fillna(0.0)
+    held_pos = pos.shift(1).fillna(0.0)
+    gross = held_pos * d_spread
+    cost = pos.diff().fillna(pos).abs() * 2.0 * cost_per_leg  # entry is charged too
+    if rolled is not None:
+        roll = rolled.reindex(idx).fillna(False).astype(float)
+        cost = cost + roll * held_pos.abs() * 4.0 * cost_per_leg
+    out = pd.DataFrame({"position": pos, "gross_pnl": gross, "cost": cost})
+    out["net_pnl"] = out["gross_pnl"] - out["cost"]
+    return out.dropna(subset=["net_pnl"])
+
+
 def backtest_calendar(
     position: pd.Series,
     wide: pd.DataFrame,
     front: str = "VIX",
     back: str = "VIX3M",
-    holding_d: int = 5,
-    cost_vol_points: float = 0.20,
+    cost_per_leg: float = 0.05,
 ) -> pd.DataFrame:
-    """Vega-neutral front-vs-back variance spread, marked daily.
+    """Front-vs-back spread marked on the VIX *indices*. NOT TRADABLE.
 
-    Both legs are held in equal vega notional, so a parallel 1-vol shift across
-    the curve nets to zero and the PnL comes from the change in *slope* alone.
-    Without that the trade is a disguised outright short.
+    Kept as the counterfactual: it shows what a curve signal appears to earn
+    when the curve itself could be traded. `backtest.futures` runs the same
+    position on futures that can be. Equal and opposite vega notional on each
+    leg, so a parallel shift of the curve nets to zero.
     """
-    idx = wide.index
-    pos = position.reindex(idx).fillna(0.0)
-
-    f, b = wide[front], wide[back]
-
-    # Equal and opposite vega notional on each leg -> pure slope exposure.
-    d_front = f.diff(holding_d).shift(-holding_d)
-    d_back = b.diff(holding_d).shift(-holding_d)
-    spread_move = d_back - d_front
-
-    gross = pos * spread_move / holding_d
-    cost = pos.diff().abs().fillna(0.0) * cost_vol_points / holding_d
-    net = gross - cost
-
-    out = pd.DataFrame(
-        {"position": pos, "gross_pnl": gross, "cost": cost, "net_pnl": net}
-    )
-    return out.dropna(subset=["net_pnl"])
+    d_spread = (wide[back] - wide[front]).diff()
+    return backtest_spread(position, d_spread, cost_per_leg)
 
 
 def walk_forward(

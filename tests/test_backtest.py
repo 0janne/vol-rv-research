@@ -37,8 +37,8 @@ def test_calendar_is_neutral_to_parallel_shifts(wide):
         shifted[c] = shifted[c] + bump
 
     pos = pd.Series(1.0, index=wide.index)
-    base = backtest_calendar(pos, wide, cost_vol_points=0.0)
-    bumped = backtest_calendar(pos, shifted, cost_vol_points=0.0)
+    base = backtest_calendar(pos, wide, cost_per_leg=0.0)
+    bumped = backtest_calendar(pos, shifted, cost_per_leg=0.0)
     np.testing.assert_allclose(
         base["gross_pnl"].to_numpy(), bumped["gross_pnl"].to_numpy(), atol=1e-9
     )
