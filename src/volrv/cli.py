@@ -30,6 +30,8 @@ def main(argv=None) -> int:
     p_sn = sub.add_parser("snapshot", help="record today's option chain")
     p_sn.add_argument("--underlying", default="SPY")
 
+    sub.add_parser("check-claims", help="verify the README's headline claims on reports/")
+
     p_au = sub.add_parser("audit-snapshots", help="flag snapshot days that repeat the day before")
     p_au.add_argument("--delete", action="store_true", help="remove the flagged days")
 
@@ -65,6 +67,15 @@ def main(argv=None) -> int:
         else:
             print(f"  option_quote {args.underlying} {n} rows")
         return 0
+
+    if args.cmd == "check-claims":
+        from .claims import check_claims
+
+        results = check_claims()
+        for claim, ok, value in results:
+            print(f"  {'PASS' if ok else 'FAIL'}  {claim.text:<48} "
+                  f"{claim.strategy}.{claim.column} = {value:.2f}")
+        return 0 if all(ok for _, ok, _ in results) else 1
 
     if args.cmd == "audit-snapshots":
         from .ingest.snapshot import audit_snapshots

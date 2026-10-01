@@ -1,5 +1,8 @@
 # Relative-value volatility research
 
+[![CI](https://github.com/0janne/vol-rv-research/actions/workflows/ci.yml/badge.svg)](https://github.com/0janne/vol-rv-research/actions/workflows/ci.yml)
+[![End-to-end](https://github.com/0janne/vol-rv-research/actions/workflows/e2e.yml/badge.svg)](https://github.com/0janne/vol-rv-research/actions/workflows/e2e.yml)
+
 A point-in-time data pipeline, volatility signals, a walk-forward backtest and
 the statistics to judge them, built to answer two questions honestly:
 
@@ -157,9 +160,14 @@ volrv init-db                           # apply sql/ migrations (idempotent)
 volrv ingest --source all               # SPX OHLC, VIX complex, ~170 VIX futures contracts
 volrv build-features                    # realised vol estimators, VRP, term structure
 volrv report                            # backtests, inference table, figures
+volrv check-claims                      # the headline claims above, as pass/fail checks
 
 pytest -q && ruff check src tests
 ```
+
+The **End-to-end** workflow runs exactly this from a clean checkout every Monday
+and on every code change, so the numbers in this README are re-derived from the
+public sources rather than trusted from the day they were written.
 
 ## Data
 
@@ -183,7 +191,8 @@ src/volrv/
   backtest/engine.py        variance tranche ladder · spread engine · walk-forward
   backtest/futures.py       contract selection, rolls, tradable spread PnL
   backtest/inference.py     Newey–West, block bootstrap, deflated Sharpe
-tests/                      54 tests, incl. the no-lookahead guard
+src/volrv/claims.py         the README's headline claims as executable checks
+tests/                      57 tests, incl. the no-lookahead guard
 ```
 
 ## References
